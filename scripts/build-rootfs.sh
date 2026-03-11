@@ -43,6 +43,7 @@ try:
     # bokeh
     sys.stdout.reconfigure(encoding='unicode-escape')
     sys.stdout.reconfigure(encoding='utf-16')
+    sys.stdout.reconfigure(encoding='utf_16-be')
     sys.stdout.reconfigure(encoding='utf-8')
 except:
     pass
@@ -67,6 +68,11 @@ import platform
 
 # for pyodide runPython emulation
 from textwrap import dedent
+
+# requests/urllib3 pyodide workaround
+import http.cookiejar
+from http.cookies import Morsel
+import encodings.idna
 
 # FIXME: because _sqlite3 is builtins anyway ?
 import sqlite3
@@ -188,6 +194,35 @@ except:
     # python 3.12 !
     pass
 
+try:
+    import contextlib
+    import traceback
+
+    # 3.14 _pyrepl
+    sys.stdout.reconfigure(encoding='latin1')
+    sys.stdout.reconfigure(encoding='utf-8')
+
+    import _suggestions
+    import _pyrepl.main
+    import _pyrepl.trace
+    import _pyrepl._threading_handler
+
+    # ?
+    import _pyrepl.simple_interact
+
+    # and native modules :
+
+# fcntl
+# math
+# _posixsubprocess
+# select
+# _struct
+# termios
+# unicodedata
+
+except:
+    pass
+
 if 0:
     import cffi
     from cffi import FFI
@@ -199,7 +234,11 @@ $HPY -u -I -B <<END
 import sys, os
 stdlp=""
 
-if os.environ.get('PYBUILD','')=='3.13':
+
+threading_model = os.popen('${HPY}-config --abiflags').read().strip()
+
+
+if 't' in threading_model:
     SCD="_sysconfigdata_t"
 else:
     SCD="_sysconfigdata_"

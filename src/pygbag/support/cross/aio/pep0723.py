@@ -21,12 +21,17 @@ import installer
 import pyparsing
 from packaging.requirements import Requirement
 
-from aio.filelike import fopen
+from zipfile import ZipFile
 
+
+# plat. dep.
 import platform
 import platform_wasm.todo
 
-from zipfile import ZipFile
+
+import asyncio
+from aio.filelike import fopen
+
 
 # TODO: maybe control wheel cache with $XDG_CACHE_HOME/pip
 
@@ -48,21 +53,19 @@ if sconf["platlib"] not in sys.path:
     sys.path.append(sconf["platlib"])
 
 PATCHLIST = []
+
 # fast skip list
-HISTORY = ["pyodide"]
+HISTORY = ["pyodide", "pytest", "pytest-ruff", "ruff", "tarfile"]
 
 hint_failed = []
 
 
 class Config:
-    #    READ_722 = False
     READ_723 = True
-    #    BLOCK_RE_722 = r"(?i)^#\s+script\s+dependencies:\s*$"
     BLOCK_RE_723 = r"(?m)^# /// (?P<type>[a-zA-Z0-9-]+)$\s(?P<content>(^#(| .*)$\s)+)^# ///$"
-    PKG_BASE_DEFAULT = "https://pygame-web.github.io/archives/repo/"
+    PKG_BASE_DEFAULT = "https://pygame-web.github.io/cdn/"
     PKG_INDEXES = []
     REPO_INDEX = "index.json"
-    REPO_DATA = "repodata.json"
     repos = []
     pkg_repolist = []
     dev_mode = ".-X.dev." in ".".join([""] + sys.orig_argv + [""])
@@ -72,49 +75,28 @@ class Config:
     Requires_Failures = []
 
     mapping = {
-        "pygame": "pygame.base",
-        "pygame_ce": "pygame.base",
+        "pygame_ce": "pygame",
+        "pygame.base": "pygame",
         "python_i18n": "i18n",
         "pillow": "PIL",
         "pyglm": "glm",
         "opencv_python": "cv2",
+#        "pysdl2": "sdl2",
+        "pysdl3": "sdl3",
     }
 
-
-def read_dependency_block_722(code):
-    # Skip lines until we reach a dependency block (OR EOF).
-    has_block = False
-    # Read dependency lines until we hit a line that doesn't
-    # start with #, or we are at EOF.
-    for line in code.split("\n"):
-        if not has_block:
-            if re.match(Config.BLOCK_RE_722, line):
-                has_block = True
-            continue
-
-        if not line.startswith("#"):
-            break
-        # Remove comments. An inline comment is introduced by
-        # a hash, which must be preceded and followed by a
-        # space.
-        line = line[1:].split(" # ", maxsplit=1)[0]
-        line = line.strip()
-        # Ignore empty lines
-        if not line:
-            continue
-        # Try to convert to a requirement. This will raise
-        # an error if the line is not a PEP 508 requirement
-        yield Requirement(line)
-
+    NOCOMPILATION = False
 
 def read_dependency_block_723(code):
+    global HISTORY, hint_failed
     # Skip lines until we reach a dependency block (OR EOF).
     has_block = False
 
     content = []
     for line in code.split("\n"):
         if not has_block:
-            if line.strip() in ["# /// pyproject", "# /// script"]:
+            # compat with draft PEP for pyproject
+            if line.rstrip() in ["# /// pyproject", "# /// script"]:
                 has_block = True
             continue
 
@@ -125,9 +107,12 @@ def read_dependency_block_723(code):
             break
 
         content.append(line[2:])
-    struct = tomllib.loads("\n".join(content))
 
-    print(json.dumps(struct, sort_keys=True, indent=4))
+    struct = tomllib.loads("\n".join(content))
+    if struct:
+        print("# 109\n",json.dumps(struct, sort_keys=True, indent=4))
+
+    # compat with draft PEP
     if struct.get("project", None):
         struct = struct.get("project", {"dependencies": []})
     deps = struct.get("dependencies", [])
@@ -141,7 +126,7 @@ def install(pkg_file, sconf=None):
     from installer.destinations import SchemeDictionaryDestination
     from installer.sources import WheelFile
     if pkg_file in HISTORY:
-        print(f"# 144: install: {pkg_file} already installed")
+        print(f"# 144: install: {pkg_file} already installed or skipped")
         return
 
     # Handler for installation directories and writing into them.
@@ -172,15 +157,6 @@ def install(pkg_file, sconf=None):
         sys.print_exception(ex)
 
 
-#    see cpythonrc
-#            if not len(Config.repos):
-#                for cdn in (Config.PKG_INDEXES or PyConfig.pkg_indexes):
-#                    async with platform.fopen(Path(cdn) / Config.REPO_DATA) as source:
-#                        Config.repos.append(json.loads(source.read()))
-#
-#                DBG("1203: FIXME (this is pyodide maintened stuff, use PEP723 asap) referenced packages :", len(cls.repos[0]["packages"]))
-
-
 async def async_repos():
     abitag = f"cp{sys.version_info.major}{sys.version_info.minor}"
     apitag = __import__("sysconfig").get_config_var("HOST_GNU_TYPE")
@@ -194,30 +170,33 @@ async def async_repos():
     if not len(Config.PKG_INDEXES):
         Config.PKG_INDEXES = [Config.PKG_BASE_DEFAULT]
 
-    print("200: async_repos", Config.PKG_INDEXES)
+    # print("# 200: async_repos", Config.PKG_INDEXES)
+
 
     for repo in Config.PKG_INDEXES:
-        idx = f"{repo}index-0.9.2-{abitag}.json"
-        try:
-            async with fopen(idx, "r", encoding="UTF-8") as index:
-                try:
-                    data = index.read()
-                    if isinstance(data, bytes):
-                        data = data.decode()
-                    data = data.replace("<abi>", abitag)
-                    data = data.replace("<api>", apitag)
-                    repo = json.loads(data)
-                except:
-                    pdb(f"213: {idx=}: malformed json index {data}")
-                    continue
-                if repo not in Config.pkg_repolist:
-                    Config.pkg_repolist.append(repo)
-        except FileNotFoundError:
-            print("\n" * 4)
-            print("!" * 75)
-            print("Sorry, there is no pygbag package repository for your python version")
-            print("!" * 75, "\n" * 4)
-            raise SystemExit
+        merged = {}
+        for pygver in ('0.9.3', ):
+            idx = f"{repo}index-{pygver}-{abitag}.json"
+            try:
+                async with fopen(idx, "r", encoding="UTF-8") as index:
+                    try:
+                        data = index.read()
+                        if isinstance(data, bytes):
+                            data = data.decode()
+                        data = data.replace("<abi>", abitag)
+                        data = data.replace("<api>", apitag)
+                        merged.update( json.loads(data) )
+                    except Exception as e:
+                        pdb(f"213: {idx=}: malformed json index {data}", e)
+                        continue
+            except FileNotFoundError:
+                print("\n" * 4)
+                print("!" * 75)
+                print("Sorry, there is no pygbag package repository for your python version")
+                print("!" * 75, "\n" * 4)
+                #raise SystemExit
+        if merged:
+            Config.pkg_repolist.append(merged)
 
     if not aio.cross.simulator:
         rewritecdn = ""
@@ -226,7 +205,7 @@ async def async_repos():
         if os.environ.get("PYGPI", ""):
             rewritecdn = os.environ.get("PYGPI")
         elif platform.window.location.href.startswith("http://localhost:8"):
-            rewritecdn = "http://localhost:8000/archives/repo/"
+            rewritecdn = "http://localhost:8000/cdn/"
 
         if rewritecdn:
             print(f"# 231: {rewritecdn=}")
@@ -242,6 +221,19 @@ def processing(dep):
         return True
     return False
 
+async def compile(verbose=False):
+    if aio.cross.simulator:
+        print(f'# 226 : Scanning {sconf["platlib"]} for WebAssembly libraries [no compilation]')
+        return
+
+    print(f'# 229: Scanning {sconf["platlib"]} for WebAssembly libraries [compiling]')
+    platform.explore(sconf["platlib"], verbose=verbose)
+    for compilation in range(1 + embed.preloading()):
+        await asyncio.sleep(0)
+        if embed.preloading() <= 0:
+            break
+    else:
+        print("# 236: ERROR: remaining wasm {embed.preloading()}")
 
 async def install_pkg(sysconf, wheel_url, wheel_pkg):
     target_filename = f"/tmp/{wheel_pkg}"
@@ -271,7 +263,7 @@ async def install_pkg(sysconf, wheel_url, wheel_pkg):
         else:
             break
         Config.Requires_Processing.append(elem)
-        print(f"# 265: {elem=}")
+        print(f"# 247: {elem=}")
         if not await pip_install(elem, sysconf):
             print(f"install: {wheel_pkg} is missing {elem}")
         else:
@@ -285,6 +277,12 @@ async def install_pkg(sysconf, wheel_url, wheel_pkg):
                 pass
 
     install(target_filename, sysconf)
+
+    # when installing everything from header, only compile once at end of checklist.
+    if Config.NOCOMPILATION:
+        return
+    else:
+        await compile()
 
 
 def do_patches():
@@ -315,9 +313,13 @@ async def pip_install(pkg, sysconf={}):
     wheel_url = ""
 
     # hack for WASM wheel repo
-    if pkg.lower() in Config.mapping:
-        pkg = Config.mapping[pkg.lower()]
-        print("294: package renamed to", pkg)
+    remap = pkg.lower().replace('-','_')
+    if remap in Config.mapping:
+        pkg = Config.mapping[remap]
+        print(f"294: {remap} package renamed to {pkg}")
+    else:
+        # just lower and _
+        pkg = remap
 
     if pkg in HISTORY:
         print(f"# 322: pip_install: {pkg} already installed")
@@ -361,7 +363,7 @@ async def pip_install(pkg, sysconf={}):
             print("324: INVALID", pkg, "from", wheel_url, e)
             #sys.print_exception(e)
     else:
-        print(f"309: no provider found for {pkg}")
+        print(f"351: no provider found for {pkg}")
 
     if not pkg in Config.Requires_Failures:
         Config.Requires_Failures.append(pkg)
@@ -371,19 +373,11 @@ PYGAME = 0
 
 
 async def parse_code(code, env):
-    global PATCHLIST, PYGAME
+    global PATCHLIST, PYGAME, HISTORY, hint_failed
 
     maybe_missing = []
 
-    #    if Config.READ_722:
-    #        for req in read_dependency_block_722(code):
-    #            pkg = str(req)
-    #            if (env / pkg).is_dir():
-    #                print("found in env :", pkg)
-    #                continue
-    #            elif pkg not in maybe_missing:
-    #                # do not change case ( eg PIL )
-    #                maybe_missing.append(pkg.lower().replace("-", "_"))
+    import platform
 
     if Config.READ_723:
         for req in read_dependency_block_723(code):
@@ -391,13 +385,21 @@ async def parse_code(code, env):
             if (env / pkg).is_dir():
                 print("found in env :", pkg)
                 continue
+            elif pkg and pkg[0]=='!':
+                skip = pkg[1:]
+                if not skip in HISTORY:
+                    HISTORY.append(skip)
+                if not skip in hint_failed:
+                    hint_failed.append(skip)
+                if skip in platform.patches:
+                    if not skip in PATCHLIST:
+                        PATCHLIST.append(skip)
+                continue
             elif pkg not in maybe_missing:
                 # do not change case ( eg PIL )
                 maybe_missing.append(pkg.lower().replace("-", "_"))
 
     still_missing = []
-
-    import platform
 
     for dep in maybe_missing:
         if dep in platform.patches:
@@ -418,21 +420,24 @@ async def parse_code(code, env):
 
 
 # parse_code does the patching
-# this is not called by pythonrc
+# this may be not called by pythonrc
 async def check_list(code=None, filename=None):
-    global PATCHLIST, async_repos, env, sconf
-    print()
-    print("-" * 11, "computing required packages", "-" * 10)
+    global PATCHLIST, env, sconf, patchlevel
 
-    # pythonrc is calling aio.pep0723.parse_code not check_list
-    # so do patching here
-    patchlevel = platform_wasm.todo.patch()
-    if patchlevel:
-        print("392: parse_code() patches loaded :", list(patchlevel.keys()))
-        platform_wasm.todo.patch = lambda: None
-        # and only do that once and for all.
-        await async_repos()
-        del async_repos
+
+    print("\n" + ("-" * 11), "computing required packages", "-" * 10)
+
+    # turn off incremental compilation until env is populated
+    last_state = Config.NOCOMPILATION
+    Config.NOCOMPILATION = True
+
+    # only do that once and for all.
+    if "patch" in vars(platform_wasm.todo):
+        patchlevel = vars(platform_wasm.todo).pop("patch")()
+        print("# 425: parse_code() patches loaded :", list(patchlevel.keys()))
+        #platform_wasm.todo.patch = lambda: None
+        await vars(sys.modules[__name__]).pop("async_repos")()
+
 
     # mandatory
     importlib.invalidate_caches()
@@ -481,26 +486,33 @@ async def check_list(code=None, filename=None):
                 continue
             await pip_install(pkg_final, sconf)
 
-    # wasm compilation
-    if not aio.cross.simulator:
-        import platform
-        import asyncio
+#    # wasm compilation
+#    if not aio.cross.simulator:
+#        import platform
+#        import asyncio
+#
+#        print(f'# 484: Scanning {sconf["platlib"]} for WebAssembly libraries')
+#        platform.explore(sconf["platlib"], verbose=True)
+#        for compilation in range(1 + embed.preloading()):
+#            # exit to js for browser wasm compiler
+#            await asyncio.sleep(0)
+#            if embed.preloading() <= 0:
+#                break
+#        else:
+#            print("# 492: ERROR: remaining wasm {embed.preloading()}")
+#
+#    # await asyncio.sleep(0)
 
-        print(f'# 439: Scanning {sconf["platlib"]} for WebAssembly library')
-        platform.explore(sconf["platlib"], verbose=True)
-        for compilation in range(1 + embed.preloading()):
+    Config.NOCOMPILATION = last_state
 
-            await asyncio.sleep(0)
-            if embed.preloading() <= 0:
-                break
-        else:
-            print("# 442: ERROR: remaining wasm {embed.preloading()}")
-        await asyncio.sleep(0)
+    print(f"# 507: compiling wasm, {last_state=}")
+    await compile(verbose=True)
 
+    print(f"# 510: patching modules if required, {PATCHLIST=}")
     do_patches()
 
-    print("-" * 40)
-    print()
+    print("# 500\n" + ("-" * 50) + "\n")
+
 
     return still_missing
 

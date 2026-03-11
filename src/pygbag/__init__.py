@@ -9,7 +9,9 @@ sys.stdout.reconfigure(encoding="utf-8")
 
 from pathlib import Path
 
-VERSION = "0.9.2"
+VERSION = "0.9.3"
+
+__version__ = VERSION
 
 # hack to test git cdn build without upgrading pygbag
 # beware can have side effects when file packager behaviour must change !
@@ -36,10 +38,10 @@ import builtins
 
 try:
     # embed builtin module handles I/O on wasm
-    import embed
+    import embed # NOQA
 
     # aio function implemented only on stackless WaPy
-    sched_yield
+    sched_yield  # NOQA
 except:
     builtins.sched_yield = lambda: None
 

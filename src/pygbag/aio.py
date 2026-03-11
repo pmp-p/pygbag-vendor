@@ -20,10 +20,12 @@ if hasattr(os, "uname") and not os.uname().machine.startswith("wasm"):
             e,
             f"""
 
-pygbag simulator rely on : {pkglist}
-please use :
+Pygbag simulator rely on : {pkglist}
 
-    MULTIDICT_NO_EXTENSIONS=1 {sys.executable} -m pip install {pkglist}
+To install them, please use the command in a terminal:
+
+    MULTIDICT_NO_EXTENSIONS=1 {sys.executable} -m pip install --user {pkglist}
+
 
 """,
         )
@@ -32,11 +34,11 @@ please use :
     import aio.pep0723
 
     if aio.pep0723.Config.dev_mode:
-        aio.pep0723.Config.PKG_INDEXES.extend(["http://localhost:8000/archives/repo/"])
+        aio.pep0723.Config.PKG_INDEXES.extend(["http://localhost:8000/cdn/"])
     else:
         aio.pep0723.Config.PKG_INDEXES.extend(
             [
-                os.environ.get("PYGPY", "https://pygame-web.github.io/archives/repo/"),
+                os.environ.get("PYGPY", "https://pygame-web.github.io/cdn/"),
             ]
         )
 
