@@ -6,14 +6,16 @@ jobs:
   build:
     runs-on: ubuntu-22.04
     env:
-        SDK_VERSION: 3.1.68.0bi
+        SDK_VERSION: 3.1.61.14bi
         SYS_PYTHON: /usr/bin/python3
-        PACKAGES: emsdk hpy pygame
-        BUILD_STATIC: emsdk hpy
+        SDKROOT: /opt/python-wasm-sdk
+        PACKAGES: emsdk pygame
+        BUILD_STATIC: emsdk
         STATIC: false
-        BUILDS: 3.12 3.13
-        CYTHON: Cython-3.0.10-py2.py3-none-any.whl
+        BUILDS: 3.12 3.13 3.14
+        CYTHON: Cython-3.0.11-py2.py3-none-any.whl
         LD_VENDOR: -sUSE_GLFW=3
+        LOPTS: -Os -g0
 
     steps:
     - uses: actions/checkout@v4.1.0
@@ -47,6 +49,7 @@ jobs:
 #            cd $GITHUB_WORKSPACE
 #            PYBUILD=3.11 PACKAGES="emsdk hpy _ctypes pygame" BUILD_STATIC="emsdk _ctypes hpy" bash ./scripts/build-loader.sh
 #
+#   PACKAGES="emsdk pygame" BUILD_STATIC="emsdk"
 
     - name: build 3.12 packages
       run: |
@@ -68,6 +71,17 @@ jobs:
             cd $GITHUB_WORKSPACE
             PYBUILD=3.13 bash ./scripts/build-loader.sh
 
+    - name: build 3.14 packages
+      run: |
+            cd $GITHUB_WORKSPACE
+            PYBUILD=3.14 bash ./scripts/build-pkg.sh
+
+    - name: build 3.14 loader
+      run: |
+            cd $GITHUB_WORKSPACE
+            PYBUILD=3.14 bash ./scripts/build-loader.sh
+
+
     - name: build PkPy loader
       run: |
             cd $GITHUB_WORKSPACE
@@ -79,10 +93,10 @@ jobs:
             touch build/web/archives/.nojekyll
             echo "<html></html>" >  build/web/archives/index.html
 
-    - name: make wheel
-      run: |
-            cd $GITHUB_WORKSPACE
-            /opt/python-wasm-sdk/python3-wasm -m build --no-isolation .
+#    - name: make wheel
+#      run: |
+#            cd $GITHUB_WORKSPACE
+#            /opt/python-wasm-sdk/python3-wasm -m build --no-isolation .
 
     - name : "Upload to GitHub pages"
       uses: JamesIves/github-pages-deploy-action@v4.6.3

@@ -1,8 +1,15 @@
+// #define SDL3 1
+// #define SDL2 1
+
+
+#if SDL2
+#include <SDL2/SDL.h>
+#endif
+
 /*
 // from python-main.c
 static PyStatus pymain_init(const _PyArgv *args);
 static void pymain_free(void);
-
 
     http://troubles.md/why-do-we-need-the-relooper-algorithm-again/
 
@@ -15,7 +22,6 @@ static void pymain_free(void);
 tty ?
 https://github.com/emscripten-core/emscripten/blob/6dc4ac5f9e4d8484e273e4dcc554f809738cedd6/src/library_syscall.js#L311
     finish ncurses : https://github.com/jamesbiv/ncurses-emscripten
-
 
 headless tests ?
 
@@ -39,11 +45,48 @@ self hosting:
     https://github.com/jprendes/emception
 
 debug:
-    https://developer.chrome.com/blog/wasm-debugging-2020/
+   https://developer.chrome.com/blog/wasm-debugging-2020/
 
 
 */
 
+#if 1
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <dirent.h>
+#include <sys/stat.h>
+#include <string.h>
+
+void find(const char *path) {
+    DIR *dir = opendir(path);
+    if (!dir) {
+        perror("opendir");
+        return;
+    }
+
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL) {
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
+            continue;
+
+        char full_path[1024];
+        snprintf(full_path, sizeof(full_path), "%s/%s", path, entry->d_name);
+
+        struct stat statbuf;
+        if (stat(full_path, &statbuf) != 0) continue;
+
+        if (S_ISDIR(statbuf.st_mode)) {
+            printf("Directory: %s/\n", full_path);
+            find(full_path);
+        } else {
+            printf("File: %s\n", full_path);
+        }
+    }
+    closedir(dir);
+}
+
+#endif
 
 #include <unistd.h>
 
@@ -567,6 +610,15 @@ puts("481");
 }
 #endif // TEST_ASYNCSLEEP
 
+#if SDL3
+#include <SDL3/SDL.h>
+static void sdlError(const char* str) {
+  fprintf(stderr, "Error at %s: %s\n", str, SDL_GetError());
+  exit(1);
+}
+
+#endif
+
 #if SDL2
 static PyObject *
 embed_get_sdl_version(PyObject *self, PyObject *_null)
@@ -577,6 +629,95 @@ embed_get_sdl_version(PyObject *self, PyObject *_null)
     return Py_BuildValue("iii", v.major, v.minor, v.patch);
 }
 #endif
+
+#if PY_VERSION_HEX >= 0x030D0000
+#   if !defined(Py_GIL_DISABLED)
+        #pragma message "unsupported Py_LIMITED_API/Py_GIL_DISABLED combination"
+EMSCRIPTEN_KEEPALIVE void
+_Py_DecRefShared(PyObject *o) {
+    Py_XDECREF(o);
+}
+EMSCRIPTEN_KEEPALIVE uintptr_t
+_Py_GetThreadLocal_Addr(void) {
+    return 0;
+}
+EMSCRIPTEN_KEEPALIVE void
+_Py_MergeZeroLocalRefcount(PyObject *op) {
+    _Py_Dealloc(op);
+}
+#   endif
+#endif
+
+static PyObject *
+embed_os_read_file(PyObject *self, PyObject *args)
+{
+    PyObject *path_obj;      /* Python str */
+    PyObject *path_bytes;    /* Python bytes (filesystem encoding) */
+    const char *path;
+    Py_ssize_t path_len;
+
+    /* Parse a Python str object */
+    if (!PyArg_ParseTuple(args, "U", &path_obj)) {
+        return NULL;
+    }
+
+    /* Convert str to bytes using filesystem encoding */
+    path_bytes = PyUnicode_EncodeFSDefault(path_obj);
+    if (!path_bytes) {
+        return NULL;  /* Encoding error */
+    }
+
+    path = PyBytes_AS_STRING(path_bytes);
+    path_len = PyBytes_GET_SIZE(path_bytes);
+
+    /* Open file */
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        PyErr_SetFromErrnoWithFilenameObject(PyExc_OSError, path_obj);
+        Py_DECREF(path_bytes);
+        return NULL;
+    }
+
+    /* Determine file size */
+    if (fseek(f, 0, SEEK_END) != 0) {
+        fclose(f);
+        Py_DECREF(path_bytes);
+        return PyErr_SetFromErrno(PyExc_OSError);
+    }
+
+    long size = ftell(f);
+    if (size < 0) {
+        fclose(f);
+        Py_DECREF(path_bytes);
+        return PyErr_SetFromErrno(PyExc_OSError);
+    }
+
+    rewind(f);
+
+    /* Allocate buffer */
+    char *buffer = (char *)malloc(size);
+    if (!buffer) {
+        fclose(f);
+        Py_DECREF(path_bytes);
+        return PyErr_NoMemory();
+    }
+
+    /* Read file */
+    size_t read_bytes = fread(buffer, 1, size, f);
+    fclose(f);
+    Py_DECREF(path_bytes);
+
+    if (read_bytes != (size_t)size) {
+        free(buffer);
+        return PyErr_SetFromErrno(PyExc_OSError);
+    }
+
+    /* Return bytes using "y#" */
+    PyObject *result = Py_BuildValue("y#", buffer, size);
+
+    free(buffer);
+    return result;
+}
 
 
 
@@ -603,6 +744,7 @@ static PyMethodDef mod_embed_methods[] = {
 
     {"readline", (PyCFunction)embed_readline,  METH_NOARGS, "get current line"},
     {"os_read",  (PyCFunction)embed_os_read,  METH_NOARGS, "get current raw stdin"},
+    {"os_read_file", (PyCFunction)embed_os_read_file, METH_VARARGS, "Read file from bytes path,return contents as bytes."},
     {"stdin_select", (PyCFunction)embed_stdin_select,  METH_NOARGS, "get current raw stdin bytes length"},
 
     {"flush", (PyCFunction)embed_flush,  METH_NOARGS, "flush stdio+stderr"},
@@ -621,6 +763,20 @@ static PyMethodDef mod_embed_methods[] = {
 
     {NULL, NULL, 0, NULL}
 };
+
+
+/* later for mphase
+static struct PyModuleDef_Slot mod_embed_slots[] = {
+#if PY_VERSION_HEX >= 0x030D0000
+    {Py_mod_gil, Py_MOD_GIL_NOT_USED},
+#endif
+    {0, NULL}
+};
+#if PY_VERSION_HEX >= 0x030D0000
+    .m_slots = mod_embed_slots,
+#endif
+*/
+
 
 static struct PyModuleDef mod_embed = {
     PyModuleDef_HEAD_INIT,
@@ -664,6 +820,9 @@ type_init_failed:;
 // helper module for pygbag api not well defined and need clean up.
 // callable as "platform" module.
     PyObject *embed_mod = PyModule_Create(&mod_embed);
+#if defined(Py_GIL_DISABLED)
+    PyUnstable_Module_SetGIL(embed_mod, Py_MOD_GIL_NOT_USED);
+#endif
 
 // from old aiolink poc
     //embed_dict = PyModule_GetDict(embed_mod);
@@ -717,6 +876,7 @@ embed_os_read(PyObject *self, PyObject *_null) {
     return Py_BuildValue("y", buf );
 #undef file
 }
+
 
 static PyObject *
 embed_stdin_select(PyObject *self, PyObject *_null) {
@@ -822,9 +982,6 @@ static void reprint(const char *fmt, PyObject *obj) {
 #if defined(EGLTEST)
     #include <GLES2/gl2.h>
     #include <EGL/egl.h>
-
-    // #include <SDL2/SDL_egl.h>
-
 // for GL
     #include <SDL2/SDL.h>
 
@@ -953,17 +1110,15 @@ embed_webgl(PyObject *self, PyObject *argv, PyObject *kw)
     EGLConfig config;
 
     char * target = NULL;
-    if (!PyArg_ParseTuple(argv, "|s", &target)) {
-        target = NULL;
-    }
+
     EmscriptenWebGLContextAttributes attr;
     emscripten_webgl_init_context_attributes(&attr);
     attr.alpha = 0;
-    if (target) {
+    if (!PyArg_ParseTuple(argv, "|s", &target)) {
+        ctx = emscripten_webgl_create_context("#canvas", &attr);
+    } else {
         ctx = emscripten_webgl_create_context(target, &attr);
         setenv("WebGL", target, 1);
-    } else {
-        ctx = emscripten_webgl_create_context("#canvas", &attr);
     }
 
     emscripten_webgl_make_context_current(ctx);
@@ -986,6 +1141,9 @@ main_(int argc, char **argv)
 
 #else
 #define CPY 1
+
+//#include "pycore_initconfig.h"    // _PyArgv
+
 int
 main(int argc, char **argv)
 #endif
@@ -1003,9 +1161,15 @@ main(int argc, char **argv)
 // defaults
     setenv("LC_ALL", "C.UTF-8", 0);
     setenv("TERMINFO", "/usr/share/terminfo", 0);
-    setenv("COLUMNS","132", 0);
-    setenv("LINES","30", 0);
-    setenv("PYGBAG","1", 1);
+    setenv("COLUMNS", "132", 0);
+    setenv("LINES", "30", 0);
+//
+    setenv("PYGBAG", "1", 1);
+
+    #if defined(Py_GIL_DISABLED)
+        setenv("PYTHON_GIL", "0", 1);
+    #endif
+
 
 //    setenv("PYTHONINTMAXSTRDIGITS", "0", 0);
     setenv("LANG", "en_US.UTF-8", 0);
@@ -1015,27 +1179,48 @@ main(int argc, char **argv)
     setenv("MPLBACKEND", "Agg", 0);
 
 // force
-    setenv("PYTHONHOME","/usr", 1);
+    setenv("PYTHONHOME", "/usr", 1);
+    setenv("PYTHONPATH", "/usr/lib/python3.14", 1);
     setenv("PYTHONUNBUFFERED", "1", 1);
-    setenv("PYTHONINSPECT","1",1);
+    setenv("PYTHONINSPECT", "1",1);
     setenv("PYTHONDONTWRITEBYTECODE","1",1);
     setenv("HOME", "/home/web_user", 1);
     setenv("APPDATA", "/home/web_user", 1);
 
-    setenv("PYGLET_HEADLESS", "1", 1);
-    setenv("ELECTRIC_TELEMETRY","disabled", 1);
+    // setenv("PYGLET_HEADLESS", "1", 1);
     setenv("PSYCOPG_WAIT_FUNC", "wait_select", 1);
 
+// rich
+    setenv("FORCE_COLOR", "1", 1);
 
+// termtk
+    setenv("TERMTK_FORCESERIAL", "1", 1);
+
+#if PY_VERSION_HEX >= 0x030F0000
+    puts(" ---------- FS ------------");
+
+    find(getenv("PYTHONPATH"));
+    setenv("PYTHONVERBOSE", "1", 1);
+
+    puts(" ---------- pymain_init ------------");
+#endif
+
+/*
+
+    _PyArgv args = {
+        .argc = argc,
+        .use_bytes_argv = 0,
+        .bytes_argv = NULL,
+        .wchar_argv = argv
+    };
+
+    status = pymain_init(&args);
+*/
     status = pymain_init(NULL);
 
-    if (PyErr_Occurred()) {
-        puts(" ---------- pymain_exit_error ----------");
-        Py_ExitStatusException(status);
-        pymain_free();
-        return 1;
-    }
-
+#if PY_VERSION_HEX >= 0x030F0000
+    puts(" ---------- pymain_init done ------------");
+#endif
     umask(18); // 0022
 
     chdir("/");
@@ -1070,6 +1255,9 @@ main(int argc, char **argv)
 
     #include MAIN_TEST_FILE
 
+
+    // https://stackoverflow.com/questions/7931182/reliably-detect-if-the-script-is-executing-in-a-web-worker
+    // self.document === undefined ?
 
 EM_ASM({
     globalThis.FD_BUFFER_MAX = $0;
@@ -1141,7 +1329,8 @@ EM_ASM({
 
 }, FD_BUFFER_MAX, io_shm[0], io_shm[IO_RAW], io_shm[IO_RCON]);
 
-    PyRun_SimpleString("import sys, os, json, builtins, time");
+    PyRun_SimpleString("import sys, os, json, builtins, time, sysconfig");
+
     PyRun_SimpleString("sys.ps1 = ''");
 
     //PyRun_SimpleString("import hpy;import hpy.universal;print('HPy init done')");
@@ -1157,17 +1346,31 @@ EM_ASM({
     }
 #endif
 
+
+
 #if SDL2
     // SDL2 basic init
     {
-        if (TTF_Init())
-            fprintf(stderr, "ERROR: TTF_Init error");
+        //if (TTF_Init())
+          //  fprintf(stderr, "ERROR: TTF_Init error");
 
         const char *target = "1";
         SDL_SetHint(SDL_HINT_EMSCRIPTEN_KEYBOARD_ELEMENT, target);
     }
 #endif
 
+#if SDL3
+    puts("================== SDL3 ====================");
+    for (int i=0;i < SDL_GetNumVideoDrivers(); i++) {
+        puts( SDL_GetVideoDriver(i) );
+    }
+  if (!SDL_Init(SDL_INIT_VIDEO)) {
+    sdlError("SDL_Init");
+  } else {
+    puts(" \n\n\n========== SDL3 init ok ====================\n\n\n");
+
+  }
+#endif
 
 #if ASYNCIFIED
     clock_t start = clock()+100;
@@ -1188,7 +1391,7 @@ EM_ASM({
 
 #if defined(WAPY)
 int main(int argc, char **argv) {
-     #if MICROPY_PY_THREAD
+    #if MICROPY_PY_THREAD
     mp_thread_init();
     #endif
     // We should capture stack top ASAP after start, and it should be
